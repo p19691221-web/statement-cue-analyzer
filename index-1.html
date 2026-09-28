@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Statement Cue Analyzer</title>
+<meta name="description" content="Browser-only behavioral cue analyzer (blink rate, eye aspect ratio). Not a lie detector.">
+<style>
+:root{
+  --bg:#f6f6f3; --card:#ffffff; --text:#1c1c1a; --muted:#66665f; --line:#e1e1db;
+  --accent:#1f5fbf; --accent-text:#ffffff; --warn-bg:#fff4e5; --warn-line:#e0b060;
+  --err:#b3261e; --curve:#1f5fbf; --thr:#c0392b; --grid:#ececE6;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#131312; --card:#1d1d1b; --text:#ecece7; --muted:#9b9b93; --line:#34342f;
+    --accent:#7aa7ff; --accent-text:#0d1a33; --warn-bg:#2b2416; --warn-line:#8a6a2a;
+    --err:#ff8a80; --curve:#7aa7ff; --thr:#ff7a6b; --grid:#2a2a27;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#131312; --card:#1d1d1b; --text:#ecece7; --muted:#9b9b93; --line:#34342f;
+  --accent:#7aa7ff; --accent-text:#0d1a33; --warn-bg:#2b2416; --warn-line:#8a6a2a;
+  --err:#ff8a80; --curve:#7aa7ff; --thr:#ff7a6b; --grid:#2a2a27;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:16px/1.55 system-ui,-apple-system,"Segoe UI","Noto Sans TC","PingFang TC",sans-serif}
+main{max-width:720px;margin:0 auto;padding:28px 16px 56px}
+h1{font-size:1.6rem;margin:0 0 2px;letter-spacing:-.01em}
+.sub{color:var(--muted);margin:0 0 20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin:0 0 16px}
+.notice{background:var(--warn-bg);border-color:var(--warn-line)}
+.notice p{margin:0 0 6px}.notice p:last-child{margin:0}
+.zh{color:var(--muted);font-size:.92em}
+label.file{display:block;font-weight:600;margin-bottom:8px}
+input[type=file]{width:100%;font:inherit;color:var(--text)}
+button{margin-top:14px;width:100%;padding:12px 16px;font:inherit;font-weight:600;border:0;border-radius:10px;
+  background:var(--accent);color:var(--accent-text);cursor:pointer}
+button:disabled{opacity:.5;cursor:default}
+#status{margin:12px 0 0;color:var(--muted);min-height:1.5em}
+progress{width:100%;height:8px;margin-top:8px;display:none;accent-color:var(--accent)}
+#error{color:var(--err);font-weight:600;margin:8px 0 0;display:none}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px}
+.stat .v{font-size:1.5rem;font-weight:700;font-variant-numeric:tabular-nums}
+.stat .k{color:var(--muted);font-size:.85rem}
+#results{display:none}
+canvas{width:100%;height:220px;display:block;margin-top:12px}
+.compliance{margin-top:12px;font-size:.9rem;color:var(--muted)}
+footer{color:var(--muted);font-size:.85rem}
+footer a{color:var(--accent)}
+video{display:none}
+</style>
+</head>
+<body>
+<main>
+  <h1>Statement Cue Analyzer</h1>
+  <p class="sub">陳述線索分析器 · research &amp; education prototype</p>
+
+  <div class="card notice">
+    <p><strong>Behavioral cues only — NOT a lie detector.</strong> Stress ≠ lying. Fatigue, lighting, eyewear and camera angle all change these numbers.</p>
+    <p>Not for hiring, legal review, or accusations against a specific person.</p>
+    <p class="zh">僅輸出可觀測線索，無法判斷是否說謊。禁止用於面試、法律審查、針對特定人物的指控。</p>
+  </div>
+
+  <div class="card">
+    <label class="file" for="file">Choose a face video <span class="zh">選擇正臉影片</span></label>
+    <input id="file" type="file" accept="video/*">
+    <button id="run" disabled>Analyze <span class="zh" style="color:inherit">分析</span></button>
+    <progress id="bar" max="1" value="0"></progress>
+    <p id="status">Video is processed in your browser and never uploaded. <span class="zh">影片只在你的裝置上處理，不會上傳。</span></p>
+    <p id="error"></p>
+  </div>
+
+  <div class="card" id="results">
+    <div class="stats">
+      <div class="stat"><div class="v" id="s-dur">–</div><div class="k">Duration · 時長</div></div>
+      <div class="stat"><div class="v" id="s-blinks">–</div><div class="k">Blinks · 眨眼次數</div></div>
+      <div class="stat"><div class="v" id="s-rate">–</div><div class="k">Blinks / min · 每分鐘</div></div>
+      <div class="stat"><div class="v" id="s-ear">–</div><div class="k">Mean EAR · 平均</div></div>
+      <div class="stat"><div class="v" id="s-cov">–</div><div class="k">Face coverage · 臉部覆蓋率</div></div>
+    </div>
+    <canvas id="chart" aria-label="Eye aspect ratio over time"></canvas>
+    <p class="compliance">[Compliance] Behavioral cue only, NOT lie detection. Stress ≠ Lying. Low face coverage means the numbers are unreliable.</p>
+  </div>
+
+  <footer>
+    <p>Method: MediaPipe Face Landmarker, eye aspect ratio (EAR) sampled at 30 fps; a blink is ≥2 consecutive samples below 0.21. The detection model is downloaded once from Google's CDN; your video stays on your device.</p>
+    <p><a href="https://github.com/p19691221-web/statement-cue-analyzer">Source code on GitHub</a></p>
+  </footer>
+  <video id="video" muted playsinline preload="auto"></video>
+</main>
+
+<script type="module">
+import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+const WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
+const MODEL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+const LEFT = [33, 160, 158, 133, 153, 144];
+const RIGHT = [362, 385, 387, 263, 373, 380];
+const EAR_THRESHOLD = 0.21;
+const MIN_CLOSED_FRAMES = 2;
+const STEP = 1 / 30;
+
+const $ = (id) => document.getElementById(id);
+const fileEl = $("file"), runEl = $("run"), barEl = $("bar"), statusEl = $("status"),
+      errEl = $("error"), video = $("video");
+
+let landmarker = null;
+let ts = 0; // detectForVideo needs strictly increasing timestamps across all calls
+
+function setStatus(msg) { statusEl.textContent = msg; }
+function showError(msg) { errEl.textContent = msg; errEl.style.display = "block"; }
+function clearError() { errEl.textContent = ""; errEl.style.display = "none"; }
+
+async function getLandmarker() {
+  if (landmarker) return landmarker;
+  setStatus("Loading detection model… 載入偵測模型中…");
+  const fileset = await FilesetResolver.forVisionTasks(WASM);
+  const opts = (delegate) => ({
+    baseOptions: { modelAssetPath: MODEL, delegate },
+    runningMode: "VIDEO",
+    numFaces: 1,
+  });
+  try {
+    landmarker = await FaceLandmarker.createFromOptions(fileset, opts("GPU"));
+  } catch (e) {
+    landmarker = await FaceLandmarker.createFromOptions(fileset, opts("CPU"));
+  }
+  return landmarker;
+}
+
+function dist(a, b) { return Math.hypot(a[0] - b[0], a[1] - b[1]); }
+function ear(pts, idx) {
+  const p = idx.map((i) => pts[i]);
+  return (dist(p[1], p[5]) + dist(p[2], p[4])) / (2 * dist(p[0], p[3]) + 1e-6);
+}
+
+function waitFor(el, event, ms = 8000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timeout waiting for ${event}`)), ms);
+    el.addEventListener(event, () => { clearTimeout(timer); resolve(); }, { once: true });
+  });
+}
+
+async function loadVideo(file) {
+  video.src = URL.createObjectURL(file);
+  try {
+    await waitFor(video, "loadeddata");
+  } catch {
+    throw new Error("Could not read this video. Try MP4 (H.264). 無法讀取影片，請改用 MP4。");
+  }
+  // iOS Safari only renders frames after a play() from a user gesture
+  try { await video.play(); video.pause(); } catch {}
+  if (!isFinite(video.duration) || video.duration <= 0) {
+    throw new Error("Video has no readable duration. 影片沒有可讀取的長度。");
+  }
+}
+
+async function seek(t) {
+  const p = waitFor(video, "seeked");
+  video.currentTime = t;
+  await p;
+}
+
+async function analyze(file) {
+  const lm = await getLandmarker();
+  setStatus("Reading video… 讀取影片中…");
+  await loadVideo(file);
+
+  const dur = video.duration;
+  const total = Math.floor(dur / STEP);
+  const times = [], ears = [];
+  let blinks = 0, run = 0, n = 0;
+
+  barEl.style.display = "block";
+  for (let i = 0; i < total; i++) {
+    const t = i * STEP;
+    await seek(t);
+    n++;
+    ts += 34;
+    const r = lm.detectForVideo(video, ts);
+    if (!r.faceLandmarks || r.faceLandmarks.length === 0) { run = 0; continue; }
+    const w = video.videoWidth, h = video.videoHeight;
+    const pts = r.faceLandmarks[0].map((p) => [p.x * w, p.y * h]);
+    const e = (ear(pts, LEFT) + ear(pts, RIGHT)) / 2;
+    times.push(t);
+    ears.push(e);
+    if (e < EAR_THRESHOLD) {
+      run++;
+    } else {
+      if (run >= MIN_CLOSED_FRAMES) blinks++;
+      run = 0;
+    }
+    if (i % 5 === 0) {
+      barEl.value = i / total;
+      setStatus(`Analyzing ${t.toFixed(1)}s / ${dur.toFixed(1)}s… 分析中`);
+    }
+  }
+  barEl.value = 1;
+  URL.revokeObjectURL(video.src);
+
+  if (n === 0) throw new Error("No readable frames. 影片沒有可讀取的畫面。");
+  if (ears.length === 0) throw new Error("No face detected in the whole video. 整段影片都沒有偵測到臉部。");
+
+  return {
+    times, ears, blinks,
+    duration: dur,
+    rate: blinks / dur * 60,
+    meanEar: ears.reduce((a, b) => a + b, 0) / ears.length,
+    coverage: ears.length / n,
+  };
+}
+
+function drawChart(times, ears, duration) {
+  const c = $("chart");
+  const dpr = window.devicePixelRatio || 1;
+  const W = c.clientWidth, H = c.clientHeight;
+  c.width = W * dpr; c.height = H * dpr;
+  const g = c.getContext("2d");
+  g.scale(dpr, dpr);
+  const css = getComputedStyle(document.documentElement);
+  const col = (v) => css.getPropertyValue(v).trim();
+
+  const padL = 40, padR = 10, padT = 10, padB = 26;
+  const yMin = Math.min(0.05, ...ears), yMax = Math.max(0.40, ...ears);
+  const x = (t) => padL + (t / duration) * (W - padL - padR);
+  const y = (v) => padT + (1 - (v - yMin) / (yMax - yMin)) * (H - padT - padB);
+
+  g.clearRect(0, 0, W, H);
+  g.font = "11px system-ui, sans-serif";
+  g.fillStyle = col("--muted");
+  g.strokeStyle = col("--grid");
+  g.lineWidth = 1;
+  for (const v of [0.1, 0.2, 0.3, 0.4]) {
+    if (v < yMin || v > yMax) continue;
+    g.beginPath(); g.moveTo(padL, y(v)); g.lineTo(W - padR, y(v)); g.stroke();
+    g.fillText(v.toFixed(1), 8, y(v) + 4);
+  }
+  const tickStep = duration > 60 ? 10 : 5;
+  for (let t = 0; t <= duration; t += tickStep) {
+    g.fillText(`${t}s`, x(t) - 8, H - 8);
+  }
+
+  g.strokeStyle = col("--thr");
+  g.setLineDash([5, 4]);
+  g.beginPath(); g.moveTo(padL, y(EAR_THRESHOLD)); g.lineTo(W - padR, y(EAR_THRESHOLD)); g.stroke();
+  g.setLineDash([]);
+  g.fillStyle = col("--thr");
+  g.fillText(`blink threshold ${EAR_THRESHOLD}`, W - padR - 120, y(EAR_THRESHOLD) - 5);
+
+  g.strokeStyle = col("--curve");
+  g.lineWidth = 1.5;
+  g.beginPath();
+  times.forEach((t, i) => {
+    const px = x(t), py = y(ears[i]);
+    // break the line where the face was lost for > 0.2s
+    if (i === 0 || t - times[i - 1] > 0.2) g.moveTo(px, py); else g.lineTo(px, py);
+  });
+  g.stroke();
+}
+
+let lastResult = null;
+
+fileEl.addEventListener("change", () => {
+  clearError();
+  runEl.disabled = !fileEl.files.length;
+});
+
+runEl.addEventListener("click", async () => {
+  const file = fileEl.files[0];
+  if (!file) return;
+  clearError();
+  runEl.disabled = true;
+  fileEl.disabled = true;
+  $("results").style.display = "none";
+  barEl.value = 0;
+  try {
+    const r = await analyze(file);
+    lastResult = r;
+    $("s-dur").textContent = `${r.duration.toFixed(1)}s`;
+    $("s-blinks").textContent = r.blinks;
+    $("s-rate").textContent = r.rate.toFixed(1);
+    $("s-ear").textContent = r.meanEar.toFixed(3);
+    $("s-cov").textContent = `${Math.round(r.coverage * 100)}%`;
+    $("results").style.display = "block";
+    drawChart(r.times, r.ears, r.duration);
+    setStatus("Done. Processed on this device only. 完成，僅在本機處理。");
+  } catch (e) {
+    showError(e.message || String(e));
+    setStatus("");
+  } finally {
+    barEl.style.display = "none";
+    runEl.disabled = false;
+    fileEl.disabled = false;
+  }
+});
+
+window.addEventListener("resize", () => {
+  if (lastResult) drawChart(lastResult.times, lastResult.ears, lastResult.duration);
+});
+</script>
+</body>
+</html>
