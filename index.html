@@ -79,13 +79,15 @@ video{display:none}
       <div class="stat"><div class="v" id="s-rate">–</div><div class="k">Blinks / min · 每分鐘</div></div>
       <div class="stat"><div class="v" id="s-ear">–</div><div class="k">Mean EAR · 平均</div></div>
       <div class="stat"><div class="v" id="s-cov">–</div><div class="k">Face coverage · 臉部覆蓋率</div></div>
+      <div class="stat"><div class="v" id="s-long">–</div><div class="k">Long closures &gt;0.5s · 長時間閉眼</div></div>
+      <div class="stat"><div class="v" id="s-thr">–</div><div class="k">Threshold used · 本片門檻</div></div>
     </div>
     <canvas id="chart" aria-label="Eye aspect ratio over time"></canvas>
     <p class="compliance">[Compliance] Behavioral cue only, NOT lie detection. Stress ≠ Lying. Low face coverage means the numbers are unreliable.</p>
   </div>
 
   <footer>
-    <p>Method: MediaPipe Face Landmarker, eye aspect ratio (EAR) sampled at 30 fps; a blink is ≥2 consecutive samples below 0.21. The detection model is downloaded once from Google's CDN; your video stays on your device.</p>
+    <p>Method: MediaPipe Face Landmarker, eye aspect ratio (EAR) sampled at 30 fps. The threshold adapts to each video: 75% of the open-eye baseline (80th-percentile EAR). A blink is a closure of 2 samples to 0.5 s; longer closures (looking down, squinting) are reported separately. The detection model is downloaded once from Google's CDN; your video stays on your device.</p>
     <p><a href="https://github.com/p19691221-web/statement-cue-analyzer">Source code on GitHub</a></p>
   </footer>
   <video id="video" muted playsinline preload="auto"></video>
@@ -98,9 +100,11 @@ const WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
 const MODEL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
 const LEFT = [33, 160, 158, 133, 153, 144];
 const RIGHT = [362, 385, 387, 263, 373, 380];
-const EAR_THRESHOLD = 0.21;
-const MIN_CLOSED_FRAMES = 2;
 const STEP = 1 / 30;
+const THRESHOLD_RATIO = 0.75;   // blink threshold = 75% of this video's open-eye baseline
+const MIN_CLOSED_FRAMES = 2;    // >= ~67 ms below threshold
+const MAX_BLINK_SEC = 0.5;      // longer closures are counted separately, not as blinks
+const GAP_SEC = 0.2;            // face lost longer than this breaks a closure run
 
 const $ = (id) => document.getElementById(id);
 const fileEl = $("file"), runEl = $("run"), barEl = $("bar"), statusEl = $("status"),
@@ -171,7 +175,7 @@ async function analyze(file) {
   const dur = video.duration;
   const total = Math.floor(dur / STEP);
   const times = [], ears = [];
-  let blinks = 0, run = 0, n = 0;
+  let n = 0;
 
   barEl.style.display = "block";
   for (let i = 0; i < total; i++) {
@@ -180,18 +184,12 @@ async function analyze(file) {
     n++;
     ts += 34;
     const r = lm.detectForVideo(video, ts);
-    if (!r.faceLandmarks || r.faceLandmarks.length === 0) { run = 0; continue; }
+    if (!r.faceLandmarks || r.faceLandmarks.length === 0) continue;
     const w = video.videoWidth, h = video.videoHeight;
     const pts = r.faceLandmarks[0].map((p) => [p.x * w, p.y * h]);
     const e = (ear(pts, LEFT) + ear(pts, RIGHT)) / 2;
     times.push(t);
     ears.push(e);
-    if (e < EAR_THRESHOLD) {
-      run++;
-    } else {
-      if (run >= MIN_CLOSED_FRAMES) blinks++;
-      run = 0;
-    }
     if (i % 5 === 0) {
       barEl.value = i / total;
       setStatus(`Analyzing ${t.toFixed(1)}s / ${dur.toFixed(1)}s… 分析中`);
@@ -203,8 +201,12 @@ async function analyze(file) {
   if (n === 0) throw new Error("No readable frames. 影片沒有可讀取的畫面。");
   if (ears.length === 0) throw new Error("No face detected in the whole video. 整段影片都沒有偵測到臉部。");
 
+  const baseline = percentile(ears, 0.8);
+  const threshold = baseline * THRESHOLD_RATIO;
+  const { blinks, longClosures } = countBlinks(times, ears, threshold);
+
   return {
-    times, ears, blinks,
+    times, ears, blinks, longClosures, baseline, threshold,
     duration: dur,
     rate: blinks / dur * 60,
     meanEar: ears.reduce((a, b) => a + b, 0) / ears.length,
@@ -212,7 +214,28 @@ async function analyze(file) {
   };
 }
 
-function drawChart(times, ears, duration) {
+function percentile(arr, q) {
+  const a = [...arr].sort((x, y) => x - y);
+  return a[Math.min(a.length - 1, Math.floor(q * a.length))];
+}
+
+function countBlinks(times, ears, threshold) {
+  let blinks = 0, longClosures = 0, run = 0;
+  const close = () => {
+    if (run >= MIN_CLOSED_FRAMES) {
+      if (run * STEP <= MAX_BLINK_SEC) blinks++; else longClosures++;
+    }
+    run = 0;
+  };
+  for (let i = 0; i < ears.length; i++) {
+    if (i > 0 && times[i] - times[i - 1] > GAP_SEC) run = 0; // face lost: discard partial run
+    if (ears[i] < threshold) run++; else close();
+  }
+  close();
+  return { blinks, longClosures };
+}
+
+function drawChart(times, ears, duration, threshold) {
   const c = $("chart");
   const dpr = window.devicePixelRatio || 1;
   const W = c.clientWidth, H = c.clientHeight;
@@ -244,10 +267,10 @@ function drawChart(times, ears, duration) {
 
   g.strokeStyle = col("--thr");
   g.setLineDash([5, 4]);
-  g.beginPath(); g.moveTo(padL, y(EAR_THRESHOLD)); g.lineTo(W - padR, y(EAR_THRESHOLD)); g.stroke();
+  g.beginPath(); g.moveTo(padL, y(threshold)); g.lineTo(W - padR, y(threshold)); g.stroke();
   g.setLineDash([]);
   g.fillStyle = col("--thr");
-  g.fillText(`blink threshold ${EAR_THRESHOLD}`, W - padR - 120, y(EAR_THRESHOLD) - 5);
+  g.fillText(`blink threshold ${threshold.toFixed(3)}`, W - padR - 130, y(threshold) + 14);
 
   g.strokeStyle = col("--curve");
   g.lineWidth = 1.5;
@@ -284,7 +307,9 @@ runEl.addEventListener("click", async () => {
     $("s-ear").textContent = r.meanEar.toFixed(3);
     $("s-cov").textContent = `${Math.round(r.coverage * 100)}%`;
     $("results").style.display = "block";
-    drawChart(r.times, r.ears, r.duration);
+    $("s-long").textContent = r.longClosures;
+    $("s-thr").textContent = `${r.threshold.toFixed(3)}`;
+    drawChart(r.times, r.ears, r.duration, r.threshold);
     setStatus("Done. Processed on this device only. 完成，僅在本機處理。");
   } catch (e) {
     showError(e.message || String(e));
@@ -297,7 +322,7 @@ runEl.addEventListener("click", async () => {
 });
 
 window.addEventListener("resize", () => {
-  if (lastResult) drawChart(lastResult.times, lastResult.ears, lastResult.duration);
+  if (lastResult) drawChart(lastResult.times, lastResult.ears, lastResult.duration, lastResult.threshold);
 });
 </script>
 </body>
